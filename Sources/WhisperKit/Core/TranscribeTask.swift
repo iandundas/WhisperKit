@@ -15,6 +15,9 @@ final class TranscribeTask {
     private let textDecoder: any TextDecoding
     private let tokenizer: any WhisperTokenizer
 
+    public var segmentDiscoveryCallback: (([TranscriptionSegment]) -> Void)?
+    public var fractionCompletedCallback: ((Float) -> Void)?
+ 
     init(
         currentTimings: TranscriptionTimings,
         progress: Progress?,
@@ -115,6 +118,13 @@ final class TranscribeTask {
                 let timeOffsetEnd = Float(seek + segmentSize) / Float(WhisperKit.sampleRate)
                 Logging.debug("Decoding Seek: \(seek) (\(formatTimestamp(timeOffset))s)")
                 Logging.debug("Decoding Window Size: \(segmentSize) (\(formatTimestamp(timeOffsetEnd - timeOffset))s)")
+
+                // print("timeOffset \(timeOffset), \(segmentSize), \(timeOffsetEnd), \(seekClipStart), \(seekClipEnd), percent: \(percentage)")
+                // @Ian
+                let totalLength = Float(seekClipEnd)/Float(WhisperKit.sampleRate)
+                let percentage = timeOffset / totalLength
+                self.fractionCompletedCallback?(timeOffset / totalLength)
+
 
                 let audioProcessingStart = Date()
                 let clipAudioSamples = Array(audioArray[seek..<(seek + segmentSize)])
@@ -227,6 +237,9 @@ final class TranscribeTask {
                         Logging.debug(line)
                     }
                 }
+
+                // @ian
+                segmentDiscoveryCallback?(currentSegments)
 
                 // add them to the `allSegments` list
                 allSegments.append(contentsOf: currentSegments)
