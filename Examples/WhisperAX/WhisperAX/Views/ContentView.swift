@@ -996,7 +996,9 @@ struct ContentView: View {
                 logLevel: .debug,
                 prewarm: false,
                 load: false,
-                download: false
+                download: false, modelStateDidChange: { _, _ in
+                    //
+                }
             )
             guard let whisperKit = whisperKit else {
                 return
