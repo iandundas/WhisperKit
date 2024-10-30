@@ -13,7 +13,11 @@ import Tokenizers
 open class WhisperKit {
     /// Models
     public private(set) var modelVariant: ModelVariant = .tiny
-    public private(set) var modelState: ModelState = .unloaded
+    public private(set) var modelState: ModelState = .unloaded {
+        didSet {
+            modelStateDidChange?(oldValue, modelState)
+        }
+    }
     public var modelCompute: ModelComputeOptions
     public var tokenizer: WhisperTokenizer?
 
@@ -42,7 +46,24 @@ open class WhisperKit {
     public var tokenizerFolder: URL?
     public private(set) var useBackgroundDownloadSession: Bool
 
-    public init(_ config: WhisperKitConfig = WhisperKitConfig()) async throws {
+
+    // ~~  Ian's modifications ~~
+    public var segmentDiscoveryCallback: (([TranscriptionSegment]) -> Void)?
+    public enum TranscriptionStateProgression {
+        case convertingAudio
+        case decodingAudio
+        case transcribing
+        case finished
+    }
+    public var transcriptionStateProgressionCallback: ((TranscriptionStateProgression) -> Void)?
+    public var fractionCompletedCallback: ((Float) -> Void)?
+    public var modelStateDidChange: ((ModelState?, ModelState) -> Void)?
+
+    // ~~  End Ian's modifications ~~
+
+    public init(_ config: WhisperKitConfig = WhisperKitConfig(),
+                modelStateDidChange: ((ModelState?, ModelState) -> Void)? = nil
+    ) async throws {
         modelCompute = config.computeOptions ?? ModelComputeOptions()
         audioProcessor = config.audioProcessor ?? AudioProcessor()
         featureExtractor = config.featureExtractor ?? FeatureExtractor()
@@ -55,6 +76,8 @@ open class WhisperKit {
         useBackgroundDownloadSession = config.useBackgroundDownloadSession
         currentTimings = TranscriptionTimings()
         Logging.shared.logLevel = config.verbose ? config.logLevel : .none
+
+        self.modelStateDidChange = modelStateDidChange // Ian
 
         try await setupModels(
             model: config.model,
@@ -94,7 +117,8 @@ open class WhisperKit {
         prewarm: Bool? = nil,
         load: Bool? = nil,
         download: Bool = true,
-        useBackgroundDownloadSession: Bool = false
+        useBackgroundDownloadSession: Bool = false,
+        modelStateDidChange: ((ModelState?, ModelState) -> Void)? = nil
     ) async throws {
         let config = WhisperKitConfig(
             model: model,
@@ -116,7 +140,7 @@ open class WhisperKit {
             download: download,
             useBackgroundDownloadSession: useBackgroundDownloadSession
         )
-        try await self.init(config)
+        try await self.init(config, modelStateDidChange: modelStateDidChange)
     }
 
     // MARK: - Model Loading
@@ -178,6 +202,7 @@ open class WhisperKit {
         return formatModelFiles(filteredSupport)
     }
 
+    /// Expects inputs like ["openai_whisper-tiny"]
     public static func formatModelFiles(_ modelFiles: [String]) -> [String] {
         let modelFilters = ModelVariant.allCases.map { "\($0.description)\($0.description.contains("large") ? "" : "/")" } // Include quantized models for large
         let modelVariants = modelFiles.map { $0.components(separatedBy: "/")[0] + "/" }
@@ -733,6 +758,10 @@ open class WhisperKit {
         decodeOptions: DecodingOptions? = nil,
         callback: TranscriptionCallback = nil
     ) async throws -> [TranscriptionResult] {
+
+        transcriptionStateProgressionCallback?(.convertingAudio) // @ian
+        // transcriptionStateProgressionCallback?(.decodingAudio) // @ian, commented because these steps are now combined below.
+
         // Process input audio file into audio samples
         let audioArray = try await withThrowingTaskGroup(of: [Float].self) { group -> [Float] in
             let convertAudioStart = Date()
@@ -746,6 +775,12 @@ open class WhisperKit {
             return try AudioProcessor.loadAudioAsFloatArray(fromPath: audioPath)
         }
 
+        transcriptionStateProgressionCallback?(.transcribing) // @ian
+        defer {
+            transcriptionStateProgressionCallback?(.finished)  // @ian
+        }
+
+        // Send converted samples to transcribe
         let transcribeResults: [TranscriptionResult] = try await transcribe(
             audioArray: audioArray,
             decodeOptions: decodeOptions,
@@ -871,6 +906,12 @@ open class WhisperKit {
                 textDecoder: textDecoder,
                 tokenizer: tokenizer
             )
+
+
+            // @id:
+            transcribeTask.segmentDiscoveryCallback = self.segmentDiscoveryCallback
+            transcribeTask.fractionCompletedCallback = self.fractionCompletedCallback
+            // @id end 
 
             let transcribeTaskResult = try await transcribeTask.run(
                 audioArray: audioArray,
